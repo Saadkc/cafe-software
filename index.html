@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Slip Printer</title>
+<style>
+  :root{--paper:#fbfaf6;--ink:#1d1d1b;--muted:#6b6a63;--line:#d9d6cb;--ok:#1f7a45;--bad:#b3261e;--accent:#1d1d1b;--bg:#e9e6dc}
+  @media (prefers-color-scheme:dark){:root{--paper:#26261f;--ink:#f1efe6;--muted:#a3a195;--line:#3d3c33;--ok:#5fcf93;--bad:#ff8a80;--accent:#f1efe6;--bg:#171712}}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--ink);font:16px/1.5 "Trebuchet MS",Verdana,sans-serif;display:flex;justify-content:center;padding:24px 16px}
+  main{width:100%;max-width:420px}
+  .slip{background:var(--paper);padding:28px 24px 34px;border:1px solid var(--line);
+    -webkit-mask:radial-gradient(circle 7px at 50% 100%,#0000 98%,#000) bottom/16px 100% repeat-x;
+    mask:radial-gradient(circle 7px at 50% 100%,#0000 98%,#000) bottom/16px 100% repeat-x}
+  h1{font:700 22px/1.2 "Courier New",monospace;margin:0 0 4px}
+  .sub{color:var(--muted);margin:0 0 20px;font-size:14px}
+  label{display:block;font-weight:700;margin:14px 0 6px;font-size:14px}
+  input{width:100%;padding:12px;font:inherit;color:var(--ink);background:transparent;border:0;border-bottom:2px dashed var(--line);border-radius:0}
+  input:focus{outline:3px solid var(--accent);outline-offset:2px;border-bottom-color:transparent}
+  .row{display:flex;gap:10px;margin-top:22px}
+  button{font:inherit;font-weight:700;cursor:pointer;border-radius:4px;padding:13px 16px;border:2px solid var(--accent)}
+  #print{flex:1;background:var(--accent);color:var(--paper)}
+  #connect{background:transparent;color:var(--ink)}
+  button:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .status{display:flex;align-items:center;gap:10px;margin:0 0 16px;padding:10px 12px;border:1px solid var(--line);font-size:14px}
+  .dot{width:12px;height:12px;border-radius:50%;background:var(--muted);flex:none}
+  .status.ok .dot{background:var(--ok)} .status.bad .dot{background:var(--bad)}
+  #msg{min-height:22px;margin:14px 0 0;font-size:14px}
+  #msg.err{color:var(--bad)} #msg.good{color:var(--ok)}
+  details{margin-top:18px;font-size:14px;color:var(--muted)}
+  summary{cursor:pointer}
+  select{font:inherit;padding:6px;background:var(--paper);color:var(--ink);border:1px solid var(--line)}
+  #slip-print{display:none}
+
+  @media print{
+    @page{size:80mm auto;margin:0}
+    body{background:#fff;display:block;padding:0}
+    main{display:none}
+    #slip-print{display:block;width:72mm;margin:0 auto;padding:4mm 0;color:#000;background:#fff;font:14px/1.35 "Courier New",monospace}
+    #slip-print.w58{width:48mm}
+    #slip-print .c{text-align:center} #slip-print .big{font-size:18px;font-weight:700}
+    #slip-print .r{display:flex;justify-content:space-between;gap:8px}
+    #slip-print hr{border:0;border-top:1px dashed #000;margin:6px 0}
+  }
+</style>
+</head>
+<body>
+<main>
+  <div class="slip">
+    <h1>Print a slip</h1>
+    <p class="sub">Type the item and price, then press Print.</p>
+
+    <div id="status" class="status"><span class="dot"></span><span id="statusText">Checking printer…</span></div>
+
+    <label for="name">Item name</label>
+    <input id="name" type="text" autocomplete="off" placeholder="e.g. Chicken burger" autofocus>
+
+    <label for="price">Item price</label>
+    <input id="price" type="number" inputmode="decimal" min="0" step="any" placeholder="e.g. 450">
+
+    <div class="row">
+      <button id="print" type="button">Print slip</button>
+      <button id="connect" type="button">Connect printer</button>
+    </div>
+    <p id="msg" role="status" aria-live="polite"></p>
+
+    <details>
+      <summary>Printer settings</summary>
+      <p><label for="width" style="display:inline">Paper width </label>
+        <select id="width"><option value="80">80 mm</option><option value="58">58 mm</option></select></p>
+      <p><label for="shop" style="display:inline">Shop name (optional) </label>
+        <input id="shop" type="text" placeholder="Printed at the top"></p>
+    </details>
+  </div>
+</main>
+
+<div id="slip-print" aria-hidden="true"></div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const store = { get(k,d){try{return localStorage.getItem(k)??d}catch(e){return d}}, set(k,v){try{localStorage.setItem(k,v)}catch(e){}} };
+  let device = null, epOut = null, ifaceNum = null;
+  const hasUSB = 'usb' in navigator;
+
+  $('width').value = store.get('width','80');
+  $('shop').value = store.get('shop','');
+  $('width').onchange = () => store.set('width', $('width').value);
+  $('shop').oninput = () => store.set('shop', $('shop').value);
+
+  function setStatus(kind, text){
+    $('status').className = 'status ' + kind;
+    $('statusText').textContent = text;
+  }
+  function msg(text, cls){ const m=$('msg'); m.textContent=text; m.className=cls||''; }
+
+  // ---------- USB printer detection ----------
+  async function open(dev){
+    await dev.open();
+    if (dev.configuration === null) await dev.selectConfiguration(1);
+    for (const itf of dev.configuration.interfaces){
+      for (const alt of itf.alternates){
+        const ep = alt.endpoints.find(e => e.direction === 'out' && e.type === 'bulk');
+        if (ep && (alt.interfaceClass === 7 || !epOut)){
+          await dev.claimInterface(itf.interfaceNumber);
+          if (alt.alternateSetting) await dev.selectAlternateInterface(itf.interfaceNumber, alt.alternateSetting);
+          device = dev; epOut = ep.endpointNumber; ifaceNum = itf.interfaceNumber;
+          return;
+        }
+      }
+    }
+    throw new Error('No printable USB endpoint found on this device.');
+  }
+  async function tryOpen(dev){
+    try{
+      await open(dev);
+      setStatus('ok', 'Printer connected: ' + (dev.productName || 'USB printer') + ' (one-click printing)');
+      $('connect').textContent = 'Reconnect';
+    }catch(e){
+      device = null;
+      const winDriver = /access|claim|denied|busy/i.test(e.message);
+      setStatus('bad', winDriver
+        ? 'Printer found, but Windows is using its driver. Print will use the normal print window.'
+        : 'Printer found but could not be opened: ' + e.message);
+    }
+  }
+  async function refresh(){
+    if (!hasUSB){ setStatus('bad','Direct USB needs Chrome or Edge. Print will use the normal print window.'); $('connect').disabled = true; return; }
+    const paired = await navigator.usb.getDevices();
+    if (paired.length) await tryOpen(paired[0]);
+    else setStatus('bad','No printer connected yet. Press “Connect printer” once.');
+  }
+  $('connect').onclick = async () => {
+    try{
+      const dev = await navigator.usb.requestDevice({ filters: [{ classCode: 7 }, {}] });
+      await tryOpen(dev);
+    }catch(e){ if (e.name !== 'NotFoundError') msg(e.message,'err'); }
+  };
+  if (hasUSB){
+    navigator.usb.addEventListener('connect', refresh);
+    navigator.usb.addEventListener('disconnect', e => {
+      if (device && e.device === device){ device = null; setStatus('bad','Printer unplugged. Plug it in and it will reconnect.'); }
+      else refresh();
+    });
+  }
+  refresh();
+
+  // ---------- ESC/POS ----------
+  const enc = s => Uint8Array.from(Array.from(s).map(ch => { const c = ch.charCodeAt(0); return c < 128 ? c : 63; }));
+  function buildEscPos(shop, name, price, cols){
+    const out = [], push = (...b) => out.push(Uint8Array.from(b)), text = s => out.push(enc(s));
+    const now = new Date().toLocaleString();
+    const line = '-'.repeat(cols);
+    const row = (l, r) => { const sp = Math.max(1, cols - l.length - r.length); return l + ' '.repeat(sp) + r + '\n'; };
+    push(0x1B,0x40);                       // init
+    push(0x1B,0x61,1);                     // center
+    if (shop){ push(0x1B,0x45,1); push(0x1D,0x21,0x11); text(shop+'\n'); push(0x1D,0x21,0); push(0x1B,0x45,0); }
+    text(now+'\n'); push(0x1B,0x61,0);     // left
+    text(line+'\n');
+    text(row(name.slice(0, cols-12), Number(price).toFixed(2)));
+    text(line+'\n');
+    push(0x1B,0x45,1); push(0x1D,0x21,0x01);
+    text(row('TOTAL', Number(price).toFixed(2)));
+    push(0x1D,0x21,0); push(0x1B,0x45,0);
+    push(0x1B,0x61,1); text('\nThank you!\n\n\n\n'); // feed
+    push(0x1D,0x56,0x42,0x00);             // partial cut
+    const len = out.reduce((a,b)=>a+b.length,0), buf = new Uint8Array(len); let o=0;
+    out.forEach(b => { buf.set(b,o); o+=b.length; });
+    return buf;
+  }
+
+  // ---------- Browser print fallback ----------
+  function browserPrint(shop, name, price){
+    const esc = s => s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    const p = $('slip-print');
+    p.className = $('width').value === '58' ? 'w58' : '';
+    p.innerHTML =
+      (shop ? `<div class="c big">${esc(shop)}</div>` : '') +
+      `<div class="c">${esc(new Date().toLocaleString())}</div><hr>` +
+      `<div class="r"><span>${esc(name)}</span><span>${Number(price).toFixed(2)}</span></div><hr>` +
+      `<div class="r big"><span>TOTAL</span><span>${Number(price).toFixed(2)}</span></div>` +
+      `<div class="c" style="margin-top:8px">Thank you!</div>`;
+    window.print();
+  }
+
+  // ---------- Print ----------
+  $('print').onclick = async () => {
+    const name = $('name').value.trim(), price = $('price').value;
+    if (!name){ msg('Enter the item name.','err'); $('name').focus(); return; }
+    if (price === '' || Number(price) < 0 || isNaN(Number(price))){ msg('Enter a valid item price.','err'); $('price').focus(); return; }
+    const shop = $('shop').value.trim();
+    const cols = $('width').value === '58' ? 32 : 42;
+
+    if (device){
+      try{
+        await device.transferOut(epOut, buildEscPos(shop, name, price, cols));
+        msg('Sent to printer.','good');
+        $('name').value=''; $('price').value=''; $('name').focus();
+        return;
+      }catch(e){
+        device = null;
+        setStatus('bad','Lost connection to printer: ' + e.message);
+        msg('Direct print failed. Opening the normal print window instead.','err');
+      }
+    }
+    browserPrint(shop, name, price);
+  };
+
+  document.addEventListener('keydown', e => { if (e.key === 'Enter') $('print').click(); });
+})();
+</script>
+</body>
+</html>
